@@ -1,0 +1,43 @@
+name: Cleanup on PR Merge
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete non-feature branches
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const headBranch = context.payload.pull_request.head.ref;
+
+            // Only KEEP branches starting with "feature/"
+            const isFeatureBranch = /^feature\//.test(headBranch);
+
+            // Add extra protection – NEVER delete main/trunk/dev/uat/prod
+            const protectedBranches = ['main', 'master', 'dev', 'uat', 'prod'];
+
+            if (isFeatureBranch || protectedBranches.includes(headBranch)) {
+              console.log(`ℹ️ Skipping protected branch: ${headBranch}`);
+              return;
+            }
+
+            // Otherwise: delete
+            try {
+              await github.rest.git.deleteRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `heads/${headBranch}`
+              });
+              console.log(`✅ Deleted temporary branch: ${headBranch}`);
+            } catch (error) {
+              console.log(`ℹ️ Could not delete ${headBranch}: ${error.message}`);
+            }
