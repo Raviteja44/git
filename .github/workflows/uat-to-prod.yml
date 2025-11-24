@@ -1,0 +1,68 @@
+name: UAT to PROD Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag representing the release candidate (same tag used from Dev→UAT)"
+        required: true
+        type: string
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # must fetch all tags and commits
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+      - name: Read input tag
+        run: echo "TAG=${{ github.event.inputs.tag }}" >> $GITHUB_ENV
+
+      - name: Resolve commit SHA from tag
+        run: |
+          SHA=$(git rev-list -n 1 "$TAG")
+          if [ -z "$SHA" ]; then
+            echo "Invalid tag: $TAG"
+            exit 1
+          fi
+          echo "Resolved SHA: $SHA"
+          echo "SHA=$SHA" >> $GITHUB_ENV
+
+      - name: Create PR branch
+        run: |
+          BRANCH="promote-uat-to-prod-${TAG}"
+          git checkout -b "$BRANCH" origin/prod
+          
+          # cherry-pick the exact commit
+          git cherry-pick "$SHA" || (echo "Cherry-pick failed" && exit 1)
+
+          git push origin "$BRANCH"
+
+      - name: Create Pull Request
+        id: pr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          source-branch: promote-uat-to-prod-${{ env.TAG }}
+          target-branch: prod
+          title: "Promote UAT → PROD: ${{ env.TAG }}"
+          body: |
+            This PR promotes commit **${{ env.SHA }}** from UAT to PROD.
+            Tag: `${{ env.TAG }}`
+          reviewers: |
+            # reviewers are handled by CODEOWNERS
+
+      - name: Auto-merge PR after approval
+        uses: peter-evans/enable-pull-request-automerge@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          pull-request-number: ${{ steps.pr.outputs.pull-request-number }}
+          merge-method: squash
