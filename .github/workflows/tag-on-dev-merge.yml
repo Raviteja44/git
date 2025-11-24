@@ -50,6 +50,8 @@ jobs:
             });
 
             core.setOutput("body", pr.data.body);
+            core.setOutput("number", prNum);
+            core.setOutput("pr_sha", pr.data.head.sha); // <-- LAST COMMIT OF PR
 
       # Parse employee / project / code_name from PR body
       - name: Extract metadata
@@ -66,7 +68,7 @@ jobs:
           [ -z "$PROJECT" ] && PROJECT="proj"
           [ -z "$CODENAME" ] && CODENAME="code"
 
-          # sanitize (remove spaces)
+          # sanitize
           EMP="${EMP// /_}"
           PROJECT="${PROJECT// /_}"
           CODENAME="${CODENAME// /_}"
@@ -76,10 +78,11 @@ jobs:
           TAG="${EMP}_${PROJECT}_${CODENAME}_${TIME}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Get latest commit SHA
+      # Instead of HEAD, tag the LAST COMMIT inside the PR
+      - name: Get PR final commit SHA
         id: commit
         run: |
-          SHA=$(git rev-parse --verify HEAD)
+          SHA="${{ steps.pr.outputs.pr_sha }}"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Create and push tag
