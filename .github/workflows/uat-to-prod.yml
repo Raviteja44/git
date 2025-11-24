@@ -1,79 +1,111 @@
-name: UAT → PROD Promotion
-
-permissions:
-  contents: write
-  pull-requests: write
+name: UAT → PROD Promotion (cherry-pick by tag)
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to promote (must be from Dev→UAT step)"
+        description: 'Tag to promote (must exist, e.g. Ravi_proj_xx_20251124_091426)'
         required: true
         type: string
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   promote:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout (full history)
+      - name: Checkout repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Configure git
+      - name: Configure git user
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
 
-      - name: Resolve commit from tag
-        id: resolve
+      - name: Resolve commit SHA from tag
+        id: sha
         run: |
           TAG="${{ github.event.inputs.tag }}"
-          SHA=$(git rev-list -n 1 "$TAG")
-          if [ -z "$SHA" ]; then
-            echo "Tag not found!"
+          if ! git rev-parse --verify "$TAG" >/dev/null 2>&1; then
+            echo "❌ Tag '$TAG' not found!"
             exit 1
           fi
+          SHA=$(git rev-list -n 1 "$TAG")
           echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "Resolved SHA: $SHA"
 
-      - name: Create promotion branch from PROD
+      - name: Cleanly create promotion branch
         id: branch
         run: |
           TAG="${{ github.event.inputs.tag }}"
           BRANCH="promote-uat-to-prod-${TAG}"
 
+          echo "Cleaning any existing branch: $BRANCH"
+
+          # Delete remote branch if exists
+          git push origin --delete "$BRANCH" 2>/dev/null || true
+
+          # Delete local branch if exists
+          git branch -D "$BRANCH" 2>/dev/null || true
+
           git fetch origin prod
+
+          # Create fresh branch from prod
           git checkout -b "$BRANCH" origin/prod
 
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "Created clean branch: $BRANCH"
 
-      - name: Cherry-pick commit
+      - name: Cherry-pick commit from UAT tag into promotion branch
         run: |
-          git cherry-pick ${{ steps.resolve.outputs.sha }} || true
+          SHA="${{ steps.sha.outputs.sha }}"
+          BRANCH="${{ steps.branch.outputs.branch }}"
 
-      - name: Push branch
+          echo "Cherry-picking $SHA into $BRANCH"
+
+          if git cherry-pick -x "$SHA"; then
+            echo "Cherry-pick succeeded"
+          else
+            echo "⚠️ Cherry-pick has conflicts, PR will show them"
+          fi
+
+      - name: Push promotion branch
         run: |
-          git push origin ${{ steps.branch.outputs.branch }}
+          BRANCH="${{ steps.branch.outputs.branch }}"
 
-      - name: Create PR to PROD
+          echo "Pushing branch: $BRANCH"
+          git push origin "$BRANCH"
+
+      - name: Create PR into prod
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const branch = "${{ steps.branch.outputs.branch }}";
-            const base = "prod";
+            const sha = "${{ steps.sha.outputs.sha }}";
             const tag = "${{ github.event.inputs.tag }}";
-            const sha = "${{ steps.resolve.outputs.sha }}";
+
+            const title = `Promote ${tag} → prod`;
+            const body = [
+              `Promotion request from **UAT → PROD**`,
+              ``,
+              `**Tag:** ${tag}`,
+              `**Cherry-picked commit:** ${sha}`,
+              ``,
+              `Please review before merging to PROD.`
+            ].join("\n");
 
             const pr = await github.rest.pulls.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
+              title,
               head: branch,
-              base: base,
-              title: `Promote UAT → PROD: ${tag}`,
-              body: `Cherry-picked commit:\n\n${sha}\n\nTag: **${tag}**`
+              base: "prod",
+              body,
             });
 
-            console.log("PR created:", pr.data.number);
+            console.log("Created PR:", pr.data.html_url);
