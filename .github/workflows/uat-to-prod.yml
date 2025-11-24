@@ -1,73 +1,79 @@
-name: UAT to PROD Promotion
-
-on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag representing the release candidate (same tag used from Dev→UAT)"
-        required: true
-        type: string
+name: UAT → PROD Promotion
 
 permissions:
   contents: write
   pull-requests: write
 
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to promote (must be from Dev→UAT step)"
+        required: true
+        type: string
 
 jobs:
   promote:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # must fetch all tags and commits
+          fetch-depth: 0
 
       - name: Configure git
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
 
-      - name: Read input tag
-        run: echo "TAG=${{ github.event.inputs.tag }}" >> $GITHUB_ENV
-
-      - name: Resolve commit SHA from tag
+      - name: Resolve commit from tag
+        id: resolve
         run: |
+          TAG="${{ github.event.inputs.tag }}"
           SHA=$(git rev-list -n 1 "$TAG")
           if [ -z "$SHA" ]; then
-            echo "Invalid tag: $TAG"
+            echo "Tag not found!"
             exit 1
           fi
-          echo "Resolved SHA: $SHA"
-          echo "SHA=$SHA" >> $GITHUB_ENV
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
 
-      - name: Create PR branch
+      - name: Create promotion branch from PROD
+        id: branch
         run: |
+          TAG="${{ github.event.inputs.tag }}"
           BRANCH="promote-uat-to-prod-${TAG}"
+
+          git fetch origin prod
           git checkout -b "$BRANCH" origin/prod
-          
-          # cherry-pick the exact commit
-          git cherry-pick "$SHA" || (echo "Cherry-pick failed" && exit 1)
 
-          git push origin "$BRANCH"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
-      - name: Create Pull Request
-        id: pr
-        uses: peter-evans/create-pull-request@v6
+      - name: Cherry-pick commit
+        run: |
+          git cherry-pick ${{ steps.resolve.outputs.sha }} || true
+
+      - name: Push branch
+        run: |
+          git push origin ${{ steps.branch.outputs.branch }}
+
+      - name: Create PR to PROD
+        uses: actions/github-script@v6
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          source-branch: promote-uat-to-prod-${{ env.TAG }}
-          target-branch: prod
-          title: "Promote UAT → PROD: ${{ env.TAG }}"
-          body: |
-            This PR promotes commit **${{ env.SHA }}** from UAT to PROD.
-            Tag: `${{ env.TAG }}`
-          reviewers: |
-            # reviewers are handled by CODEOWNERS
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const branch = "${{ steps.branch.outputs.branch }}";
+            const base = "prod";
+            const tag = "${{ github.event.inputs.tag }}";
+            const sha = "${{ steps.resolve.outputs.sha }}";
 
-      - name: Auto-merge PR after approval
-        uses: peter-evans/enable-pull-request-automerge@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          pull-request-number: ${{ steps.pr.outputs.pull-request-number }}
-          merge-method: squash
+            const pr = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: branch,
+              base: base,
+              title: `Promote UAT → PROD: ${tag}`,
+              body: `Cherry-picked commit:\n\n${sha}\n\nTag: **${tag}**`
+            });
+
+            console.log("PR created:", pr.data.number);
