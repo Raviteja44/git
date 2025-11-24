@@ -1,0 +1,101 @@
+name: Dev → UAT Promotion (cherry-pick by tag)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to promote (must exist in repo, e.g. alice_proj_feature_20251123_173012)'
+        required: true
+        type: string
+      temp_branch_prefix:
+        description: 'Prefix for temporary branch (default: promote)'
+        required: false
+        default: promote
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  cherry_pick_and_pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo (fetch all)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Setup git user
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+      - name: Resolve tag commit SHA
+        id: rev
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if ! git rev-parse --verify "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG not found"; exit 1
+          fi
+          SHA=$(git rev-list -n 1 "$TAG")
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Create temp branch from uat
+        id: branch
+        run: |
+          PREFIX="${{ github.event.inputs.temp_branch_prefix }}"
+          TIMESTAMP=$(date +'%Y%m%d%H%M%S')
+          TB="${PREFIX}/${{ github.actor }}_${TIMESTAMP}"
+          git fetch origin uat
+          git checkout -b "$TB" origin/uat
+          echo "temp_branch=$TB" >> "$GITHUB_OUTPUT"
+
+      - name: Cherry-pick the tagged commit onto temp branch
+        id: cp
+        run: |
+          SHA=${{ steps.rev.outputs.sha }}
+          TB=${{ steps.branch.outputs.temp_branch }}
+          # Attempt cherry-pick
+          set -e
+          echo "Cherry-picking $SHA onto $TB"
+          if git cherry-pick -x "$SHA"; then
+            echo "cherry_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cherry_ok=false" >> "$GITHUB_OUTPUT"
+            echo "Cherry-pick failed: unresolved conflicts. Please resolve in PR."
+            git status
+            # keep conflicts staged so PR shows them
+          fi
+          echo "cherry_sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Push temp branch to origin
+        run: |
+          TB=${{ steps.branch.outputs.temp_branch }}
+          git push origin HEAD:refs/heads/"$TB"
+
+      - name: Create PR (temp -> uat)
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const tempBranch = "${{ steps.branch.outputs.temp_branch }}";
+            const base = "uat";
+            const title = `Promote ${tempBranch} (tag: ${{ github.event.inputs.tag }}) → ${base}`;
+            const body = [
+              `This PR was created by automation to promote tag **${{ github.event.inputs.tag }}**.`,
+              `Cherry-picked commit: ${ {sha: '${{ steps.rev.outputs.sha }}' }.sha }`,
+              '',
+              'If there are conflicts they must be resolved in this PR.'
+            ].join('\n\n');
+            const pr = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              head: tempBranch,
+              base,
+              body
+            });
+            core.setOutput('pr_number', pr.data.number);
+            console.log('Created PR:', pr.data.number);
