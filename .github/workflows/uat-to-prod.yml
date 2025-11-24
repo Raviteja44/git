@@ -1,0 +1,79 @@
+name: UAT → PROD Promotion
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to promote (must be from Dev→UAT step)"
+        required: true
+        type: string
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+      - name: Resolve commit from tag
+        id: resolve
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          SHA=$(git rev-list -n 1 "$TAG")
+          if [ -z "$SHA" ]; then
+            echo "Tag not found!"
+            exit 1
+          fi
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+
+      - name: Create promotion branch from PROD
+        id: branch
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          BRANCH="promote-uat-to-prod-${TAG}"
+
+          git fetch origin prod
+          git checkout -b "$BRANCH" origin/prod
+
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Cherry-pick commit
+        run: |
+          git cherry-pick ${{ steps.resolve.outputs.sha }} || true
+
+      - name: Push branch
+        run: |
+          git push origin ${{ steps.branch.outputs.branch }}
+
+      - name: Create PR to PROD
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const branch = "${{ steps.branch.outputs.branch }}";
+            const base = "prod";
+            const tag = "${{ github.event.inputs.tag }}";
+            const sha = "${{ steps.resolve.outputs.sha }}";
+
+            const pr = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: branch,
+              base: base,
+              title: `Promote UAT → PROD: ${tag}`,
+              body: `Cherry-picked commit:\n\n${sha}\n\nTag: **${tag}**`
+            });
+
+            console.log("PR created:", pr.data.number);
