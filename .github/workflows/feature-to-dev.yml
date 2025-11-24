@@ -1,0 +1,73 @@
+name: Feature → Dev (create PR)
+
+# Manual trigger so it does NOT run on every push
+on:
+  workflow_dispatch:
+    inputs:
+      feature_branch:
+        description: 'Feature branch to promote (e.g. feature/jira-123)'
+        required: true
+        type: string
+      employee:
+        description: 'Your name for tag (optional, used later)'
+        required: false
+        type: string
+      project:
+        description: 'Project short name (optional)'
+        required: false
+        type: string
+      code_name:
+        description: 'Code name or short feature name (optional)'
+        required: false
+        type: string
+
+permissions:
+  contents: write     # needed to push branches and tags
+  pull-requests: write
+
+jobs:
+  create_pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure feature branch exists locally
+        run: |
+          git fetch origin ${{ github.event.inputs.feature_branch }}:refs/remotes/origin/${{ github.event.inputs.feature_branch }} || true
+          git checkout --progress --force ${{ github.event.inputs.feature_branch }}
+
+      - name: Create PR (feature -> dev)
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const src = core.getInput('feature_branch') || process.env['GITHUB_REF_NAME'] || '${{ github.event.inputs.feature_branch }}';
+            const sourceBranch = src;
+            const destination = 'dev';
+            // Compose PR title & body with tag metadata suggestion
+            const title = `Promote ${sourceBranch} → ${destination}`;
+            const body = [
+              `Automated promotion PR from **${sourceBranch}** to **${destination}**.`,
+              '',
+              `**Suggested tag metadata (use when promoting dev→uat):**`,
+              `employee: ${{ github.event.inputs.employee || github.actor }}`,
+              `project: ${{ github.event.inputs.project || '' }}`,
+              `code_name: ${{ github.event.inputs.code_name || '' }}`,
+              '',
+              `Merge must be approved as per branch protection rules.`
+            ].join('\n');
+
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              head: sourceBranch,
+              base: destination,
+              body,
+              maintainer_can_modify: true
+            });
+            core.setOutput('pr_number', pr.number);
+            console.log('PR created:', pr.number);
